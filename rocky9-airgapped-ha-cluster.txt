@@ -1,0 +1,245 @@
+# rocky9-airgapped-ha-cluster
+Complete deployment guide for Pacemaker/Corosync HA clusters on Rocky Linux 9.
+
+# High Availability (HA) Cluster Deployment Guide
+### Rocky Linux 9 — Air-Gapped Environment
+
+**Author:** Devendra Raut  
+**Platform:** Rocky Linux 9.x  
+**Stack:** Pacemaker, Corosync, PCS, Resource Agents  
+
+---
+
+## 1. Deep Dive: Demystifying the HA Cluster Stack
+
+
+### 1.1. Corosync (The Heartbeat Layer)
+Corosync is the low-level infrastructure layer responsible for cluster membership and communication. It handles the background "handshake" between nodes.
+* **How it works:** Nodes constantly whisper to each other over the network using redundant UDP/IP sockets. This is known as the **Heartbeat**.
+* **Quorum Calculation:** Corosync counts how many nodes are healthy. In a standard 2-node cluster, if one node drops, quorum is lost (since 50% isn't a strict majority). Corosync computes this state math and alerts Pacemaker.
+* **Under the Hood (Knet):** Rocky Linux 9 uses `kronosnet` (`knet`) inside Corosync to auto-switch between network links if one network interface card (NIC) or switch dies.
+
+### 1.2. Pacemaker (The Brain & Resource Manager)
+Pacemaker is the high-level smart controller. It does not care *how* network wires are hooked up; it only reacts to the state data provided by Corosync.
+* **The Decision Maker:** If Corosync reports that `master1` went silent, Pacemaker checks its rulebook. It determines what applications were running on `master1` and schedules their clean activation on `master2`.
+* **Continuous Monitoring:** Pacemaker runs non-stop loops checking your services. If an application crashes but the server stays alive, Pacemaker will attempt to restart the application locally before forcing a failover.
+
+### 1.3. Resource Agents (The Hands)
+Pacemaker doesn't natively know how to configure a network IP address or start an Apache server. Instead, it relies on **Resource Agents**.
+* Resource Agents are standardized Open Cluster Framework (OCF) compliance scripts.
+* When Pacemaker says *"Start Apache"*, it executes the `ocf:heartbeat:apache` script behind the scenes, passing your configuration file parameters to it.
+
+### 1.4. Fence Agents / STONITH (The Enforcer)
+**STONITH** stands for *Shoot The Other Node In The Head*. If `master1` freezes up due to high CPU load, it might stop sending heartbeats. `master2` thinks `master1` is dead and tries to start up the webserver. However, if `master1` is actually alive but just lagging, both nodes will try to manage the same data, leading to a **Split-Brain** scenario that corrupts your storage.
+* **The Fix:** Before `master2` safely takes over, it uses a Fence Agent to send a hard power-off signal to `master1` via its remote management board (iLO, iDRAC, or IPMI), physically pulling its plug via software.
+
+---
+
+## 2. Prerequisites & Network Topology Matrix
+
+Ensure your air-gapped sandbox or hardware racks match the parameters below:
+
+| Hostname | Static Management IP | Operational Cluster Role |
+| :--- | :--- | :--- |
+| `master1` | `192.168.1.101` | Active Primary Node (Initial state) |
+| `master2` | `192.168.1.102` | Passive Standby Node (Initial state) |
+| **`Cluster_VIP`** | **`192.168.1.200`** | Shared Floating Virtual IP Address |
+
+### Host Resolution Setup
+On **both** systems, populate `/etc/hosts` to bypass DNS lookups:
+
+192.168.1.101 master1
+192.168.1.102 master2
+
+3. Local Media & Offline HA Repository Setup
+
+Because the target cluster is isolated inside a secure, air-gapped zone, you must feed it standard installation files manually using a local copy of the OS media.
+3.1. Mount the Baseline OS ISO
+
+# mkdir -p /mnt/iso
+# mount -o loop Rocky-9-x86_64-dvd.iso /mnt/iso
+
+Bash
+
+# mkdir -p /mnt/iso
+# mount -o loop Rocky-9-x86_64-dvd.iso /mnt/iso
+
+Creates access paths to standard BaseOS and AppStream directories.
+3.2. Map DNF to the Local Media
+
+Create /etc/yum.repos.d/local.repo:
+Ini, TOML
+
+# [BaseOS]
+# name=BaseOS - Local ISO
+# baseurl=file:///mnt/iso/BaseOS
+# enabled=1
+# gpgcheck=0
+# 
+# [AppStream]
+# name=AppStream - Local ISO
+# baseurl=file:///mnt/iso/AppStream
+# enabled=1
+# gpgcheck=0
+
+3.3. Building the High-Availability Mirror Channel
+
+The native installer DVD drops the clustering engine binaries to save disc space. You must fetch them from an internet-facing machine running an identical Rocky OS.
+
+On the Internet-Connected Machine:
+Bash
+
+# dnf config-manager --set-enabled highavailability
+# dnf download --resolve --alldeps --destdir=/opt/ha-download pcs pacemaker corosync resource-agents fence-agents-all createrepo_c
+
+On the Target Air-Gapped Cluster Nodes:
+Transfer those .rpm files using a secure USB drive or hardware carrier into /opt/ha-repo. Then, initialize the offline index:
+Bash
+
+# dnf install -y /opt/ha-repo/createrepo_c*.rpm
+# createrepo /opt/ha-repo		
+
+# cat <<EOF > /etc/yum.repos.d/local-ha.repo
+# [local-ha]
+# name=HighAvailability - Offline Repo
+# baseurl=file:///opt/ha-repo
+# enabled=1
+# gpgcheck=0
+# EOF
+
+# dnf clean all && dnf makecache
+
+4. Installation & Cluster Layer Provisioning
+
+Run these commands on both nodes (master1 and master2).
+4.1. Install the Core Software
+Bash
+
+# dnf install -y pcs pacemaker corosync resource-agents fence-agents-all
+
+4.2. Turn on the Web Configuration System
+Bash
+
+# systemctl enable pcsd --now
+
+4.3. Synchronize the Administrative Password
+
+Set a matching password for the default hacluster user account on both nodes:
+Bash
+
+# passwd hacluster
+
+4.4. Authenticate and Initialize Cluster Links
+
+From master1 only, link the environments together:
+Bash
+
+# pcs host auth master1 master2 -u hacluster
+# pcs cluster setup hpc master1 master2
+# pcs cluster start --all
+# pcs cluster enable --all
+
+4.5. Verify Core Infrastructure Integrity
+Bash
+
+# pcs status
+
+Ensure both hostnodes are marked Online.
+5. Adding Cluster Resources (VIP & Services)
+
+Now that the foundational cluster is stable, we need to add resources. We will set up a floating Virtual IP (VIP) and a Web Server (Apache).
+
+                 [ Client Traffic: 192.168.1.200 ]
+                               |
+                               v
+                     +-------------------+
+                     |    Cluster_VIP    |
+                     +-------------------+
+                               | (Starts First)
+                               v
+                     +-------------------+
+                     |     WebServer     |
+                     +-------------------+
+
+5.1. Step 1: Provision the Virtual IP (VIP)
+
+Run this command on any one of the cluster nodes to spin up a floating IP:
+Bash
+
+# pcs resource create Cluster_VIP ocf:heartbeat:IPaddr2 ip=192.168.1.200 cidr_netmask=24 op monitor interval=10s
+
+    ocf:heartbeat:IPaddr2: The specialized resource agent script that manages aliased IP assignments on local network cards.
+
+    op monitor interval=10s: Instructs Pacemaker to check every 10 seconds if this IP is active and online.
+
+5.2. Step 2: Provision the Application Service (Apache)
+
+First, make sure Apache is installed on both machines (dnf install -y httpd).
+
+    ⚠️ CRITICAL PRODUCTION RULE: You must never enable or start Apache using standard system control commands (systemctl enable httpd). If systemd starts Apache on boot behind the back of Pacemaker, it will break the cluster configuration, cause resource lockouts, and trigger split-brain states.
+
+Hand complete operational control of Apache over to the cluster engine:
+Bash
+
+# pcs resource create WebServer ocf:heartbeat:apache configfile="/etc/httpd/conf/httpd.conf" op monitor interval=10s
+
+5.3. Step 3: Binding the VIP and Application Together (Constraints)
+
+By default, Pacemaker treats resources as completely independent. It might host the Cluster_VIP on master1 and spin up the WebServer daemon on master2. This would cause connection errors for clients trying to reach the application.
+
+To keep them synchronized, configure Cluster Constraints:
+Rule A: The Colocation Rule (They must live together)
+
+This forces the WebServer daemon to always run on whichever physical host node currently holds the floating Cluster_VIP.
+Bash
+
+# pcs constraint colocation add WebServer with Cluster_VIP score=INFINITY
+
+Setting the score to INFINITY creates a strict requirement that they must stay together.
+Rule B: The Ordering Rule (They must start sequentially)
+
+This ensures that the network stack interface layer is up and ready before the webserver service starts up and attempts to bind to it.
+Bash
+
+# pcs constraint order start Cluster_VIP then start WebServer
+
+6. Fencing (STONITH) Realities
+
+In development or lab environments where physical power switches are unavailable, you can temporarily disable the mandatory fencing safely check:
+Bash
+
+# pcs property set stonith-enabled=false
+
+    🔴 PRODUCTION WARNING: Never disable STONITH in a live enterprise environment. If you lose network connectivity between nodes, both will try to start the services simultaneously, resulting in a split-brain state that can corrupt data. Always configure a real physical fence agent (like IPMI, iLO, or VMware) before deploying to production.
+
+7. Failover Testing & Verification
+
+To verify that the high availability components are working as expected, simulate a sudden node failure:
+Bash
+
+# systemctl stop pacemaker
+
+Log into master2 immediately and review its status:
+Bash
+
+# pcs status
+
+Expected Operational Behavior:
+
+    Pacemaker flags master1 as dead/offline.
+
+    The Cluster_VIP (192.168.1.200) automatically migrates to master2.
+
+    The WebServer service safely launches on master2 and begins answering incoming traffic with minimal downtime.
+
+8. Useful Quick Commands
+Bash
+
+# pcs status                                  # Comprehensive real-time status summary
+# pcs resource refresh                        # Clear resource error blocks and force a check
+# corosync-cfgtool -s                         # Review health of network interfaces
+# journalctl -u pacemaker -n 50 --no-pager    # Check the latest 50 cluster engine logs
+
+
+---
+
