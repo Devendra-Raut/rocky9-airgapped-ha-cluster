@@ -59,10 +59,6 @@ Because the target cluster is isolated inside a secure, air-gapped zone, you mus
 # mkdir -p /mnt/iso
 # mount -o loop Rocky-9-x86_64-dvd.iso /mnt/iso
 
-Bash
-
-# mkdir -p /mnt/iso
-# mount -o loop Rocky-9-x86_64-dvd.iso /mnt/iso
 
 Creates access paths to standard BaseOS and AppStream directories.
 3.2. Map DNF to the Local Media
@@ -87,7 +83,6 @@ Ini, TOML
 The native installer DVD drops the clustering engine binaries to save disc space. You must fetch them from an internet-facing machine running an identical Rocky OS.
 
 On the Internet-Connected Machine:
-Bash
 
 # dnf config-manager --set-enabled highavailability
 # dnf download --resolve --alldeps --destdir=/opt/ha-download pcs pacemaker corosync resource-agents fence-agents-all createrepo_c
@@ -113,26 +108,25 @@ Bash
 
 Run these commands on both nodes (master1 and master2).
 4.1. Install the Core Software
-Bash
+
 
 # dnf install -y pcs pacemaker corosync resource-agents fence-agents-all
 
 4.2. Turn on the Web Configuration System
-Bash
 
 # systemctl enable pcsd --now
 
 4.3. Synchronize the Administrative Password
 
 Set a matching password for the default hacluster user account on both nodes:
-Bash
+
 
 # passwd hacluster
 
 4.4. Authenticate and Initialize Cluster Links
 
 From master1 only, link the environments together:
-Bash
+
 
 # pcs host auth master1 master2 -u hacluster
 # pcs cluster setup hpc master1 master2
@@ -140,7 +134,7 @@ Bash
 # pcs cluster enable --all
 
 4.5. Verify Core Infrastructure Integrity
-Bash
+
 
 # pcs status
 
@@ -179,7 +173,7 @@ First, make sure Apache is installed on both machines (dnf install -y httpd).
     ⚠️ CRITICAL PRODUCTION RULE: You must never enable or start Apache using standard system control commands (systemctl enable httpd). If systemd starts Apache on boot behind the back of Pacemaker, it will break the cluster configuration, cause resource lockouts, and trigger split-brain states.
 
 Hand complete operational control of Apache over to the cluster engine:
-Bash
+
 
 # pcs resource create WebServer ocf:heartbeat:apache configfile="/etc/httpd/conf/httpd.conf" op monitor interval=10s
 
@@ -191,7 +185,7 @@ To keep them synchronized, configure Cluster Constraints:
 Rule A: The Colocation Rule (They must live together)
 
 This forces the WebServer daemon to always run on whichever physical host node currently holds the floating Cluster_VIP.
-Bash
+
 
 # pcs constraint colocation add WebServer with Cluster_VIP score=INFINITY
 
@@ -199,14 +193,14 @@ Setting the score to INFINITY creates a strict requirement that they must stay t
 Rule B: The Ordering Rule (They must start sequentially)
 
 This ensures that the network stack interface layer is up and ready before the webserver service starts up and attempts to bind to it.
-Bash
+
 
 # pcs constraint order start Cluster_VIP then start WebServer
 
 6. Fencing (STONITH) Realities
 
 In development or lab environments where physical power switches are unavailable, you can temporarily disable the mandatory fencing safely check:
-Bash
+
 
 # pcs property set stonith-enabled=false
 
@@ -215,12 +209,12 @@ Bash
 7. Failover Testing & Verification
 
 To verify that the high availability components are working as expected, simulate a sudden node failure:
-Bash
+
 
 # systemctl stop pacemaker
 
 Log into master2 immediately and review its status:
-Bash
+
 
 # pcs status
 
@@ -233,7 +227,6 @@ Expected Operational Behavior:
     The WebServer service safely launches on master2 and begins answering incoming traffic with minimal downtime.
 
 8. Useful Quick Commands
-Bash
 
 # pcs status                                  # Comprehensive real-time status summary
 # pcs resource refresh                        # Clear resource error blocks and force a check
